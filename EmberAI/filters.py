@@ -468,10 +468,17 @@ def configure(**kwargs):
     _processor = FilterProcessor(_config)
     logger.info("✅ EmberAI Filters configured")
 
-async def process(users: List[Dict], **kwargs) -> Dict:
+async def process(users: List[Dict], **kwargs) -> List[Dict]:
     """Process users with AI-powered filtering."""
     config = FilterConfig(**kwargs)
     processor = FilterProcessor(config)
-    return await processor.process_filters(users)
+    result = await processor.process_filters(users)
+
+    logger.info(f"✅ Filters applied: {result['filters_applied']}")
+    logger.info(f"✅ Original count: {result['original_count']}")
+    logger.info(f"✅ Final count: {result['final_count']}")
+    logger.info(f"✅ Processing stats: {result['processing_stats']}")
+
+    return result['processed_users']
 
 __all__ = ["FilterConfig", "FilterProcessor", "configure", "process"] 
