@@ -7,11 +7,12 @@ from dataclasses import dataclass
 import logging
 import time
 import asyncio
+import os
+import json
 from aiolimiter import AsyncLimiter
 from .ai import get_instance as get_ai_instance
 
 logger = logging.getLogger(__name__)
-
 
 UNIQUE_EU_USERNAMES = [
     "Albrecht",
@@ -135,350 +136,476 @@ class FilterConfig:
     rate_limit_per_sec: int = 50
     max_concurrent: int = 128
 
-class FilterProcessor:
-    """AI-powered filtering and enrichment processor."""
+# Configuration via env vars
+BATCH_SIZE: int = int(os.getenv("EU_BATCH_SIZE", 25))
+RATE_LIMIT_PER_SEC: int = int(os.getenv("EMBER_API_RATE_PER_SEC", 50))
+MAX_IN_FLIGHT: int = int(os.getenv("EU_MAX_CONCURRENT", 128))
+
+# Rate limiter and semaphore to cap concurrency & vendor usage
+_limiter = AsyncLimiter(RATE_LIMIT_PER_SEC, time_period=1)
+_semaphore = asyncio.Semaphore(MAX_IN_FLIGHT)
+
+# EU Filter System Prompts
+EU_SYSTEM_PROMPT = """\
+You are an EU-location classifier with optional name-based blocking.
+Return exactly one XML tag:
+<classification>EU</classification>
+or
+<classification>NOT_EU</classification>
+No extra text."""
+
+EU_FEW_SHOT = """\
+<example>
+  <location>Berlin</location>
+  <description>Tech enthusiast in Mitte</description>
+  <name>Johannes Schmidt</name>
+  <classification>EU</classification>
+</example>
+<example>
+  <location>New York, USA</location>
+  <description>Librarian</description>
+  <name>Emma Johnson</name>
+  <classification>NOT_EU</classification>
+</example>
+<example>
+  <location></location>
+  <description></description>
+  <name>cryptoFan123</name>
+  <classification>NOT_EU</classification>
+</example>
+<example>
+  <location></location>
+  <description></description>
+  <name>Eckhart Müller</name>
+  <classification>EU</classification>
+</example>\
+"""
+
+# Legal Filter System Prompts
+LEGAL_SYSTEM_PROMPT = """\
+You are a legal profession classifier that identifies lawyers, attorneys, and legal professionals.
+
+CLASSIFICATION RULES:
+- LEGAL: Licensed attorneys, lawyers, judges, prosecutors, legal counsel, law firm partners/associates
+- NOT_LEGAL: Law students, paralegals, legal analysts, compliance officers, legal assistants
+
+STRONG INDICATORS (any 1 = LEGAL):
+- Professional titles: Attorney, Lawyer, Esq., Counsel, Barrister, Solicitor, Judge, Prosecutor
+- Law firm affiliations: Partner, Associate, Of Counsel at law firms
+- Bar admissions: "Admitted to [State] Bar", "Licensed attorney"
+- Legal degrees in practice: JD, LLB with current legal work
+- Court roles: Judge, Magistrate, Legal Clerk
+
+WEAK INDICATORS (need 2+ = LEGAL):
+- Legal education: Law school names, LLM degree
+- Legal-adjacent roles: In-house counsel, legal department
+- Legal hashtags: #LawyerLife, #AttorneyLife, #LegalEagle
+- Legal emojis: ⚖️, 🧑‍⚖️
+
+EXCLUSIONS (always NOT_LEGAL):
+- Law students (unless also practicing)
+- Paralegals, legal assistants, legal secretaries
+- Compliance officers, legal analysts without JD
+- Non-practicing JDs in other fields
+- Sarcasm: "armchair lawyer", "not real legal advice"
+
+Return exactly one XML tag:
+<classification>LEGAL</classification>
+or
+<classification>NOT_LEGAL</classification>
+No extra text."""
+
+LEGAL_FEW_SHOT = """\
+<example>
+  <username>john_attorney</username>
+  <full_name>John Smith, Esq.</full_name>
+  <description>Partner at Skadden, Arps. Corporate law.</description>
+  <classification>LEGAL</classification>
+</example>
+<example>
+  <username>judge_martinez</username>
+  <full_name>Hon. Maria Martinez</full_name>
+  <description>Superior Court Judge, 15th District</description>
+  <classification>LEGAL</classification>
+</example>
+<example>
+  <username>techguy</username>
+  <full_name>Mike Johnson</full_name>
+  <description>Software engineer at startup. Code = Law ⚖️</description>
+  <classification>NOT_LEGAL</classification>
+</example>
+<example>
+  <username>lawstudent2024</username>
+  <full_name>Sarah Davis</full_name>
+  <description>3L at Harvard Law School. Future BigLaw associate!</description>
+  <classification>NOT_LEGAL</classification>
+</example>
+<example>
+  <username>legalcounsel</username>
+  <full_name>David Chen, JD</full_name>
+  <description>General Counsel at TechCorp. Admitted NY Bar.</description>
+  <classification>LEGAL</classification>
+</example>
+<example>
+  <username>paralegal_jane</username>
+  <full_name>Jane Wilson</full_name>
+  <description>Paralegal at Thompson & Associates. 10 years experience.</description>
+  <classification>NOT_LEGAL</classification>
+</example>
+<example>
+  <username>prosecutor_smith</username>
+  <full_name>Robert Smith</full_name>
+  <description>Assistant District Attorney, Criminal Division</description>
+  <classification>LEGAL</classification>
+</example>
+<example>
+  <username>compliance_pro</username>
+  <full_name>Lisa Brown</full_name>
+  <description>Compliance Officer at Bank. Legal background.</description>
+  <classification>NOT_LEGAL</classification>
+</example>\
+"""
+
+# Gender Filter System Prompts
+GENDER_SYSTEM_PROMPT = """\
+You are a gender classifier based on names.
+Return exactly one XML tag:
+<gender>male</gender>
+or
+<gender>female</gender>
+or
+<gender>unknown</gender>
+No extra text."""
+
+GENDER_FEW_SHOT = """\
+<example>
+  <name>John Smith</name>
+  <username>johnsmith</username>
+  <gender>male</gender>
+</example>
+<example>
+  <name>Maria Garcia</name>
+  <username>maria_g</username>
+  <gender>female</gender>
+</example>
+<example>
+  <name></name>
+  <username>crypto123</username>
+  <gender>unknown</gender>
+</example>\
+"""
+
+BATCH_OUTPUT_INSTRUCTIONS = (
+    "Return exactly one classification tag for every input block, "
+    "one per line, in the same order. Do not add extra text."
+)
+
+def build_eu_batch_prompt(users: List[Dict], block_unique_names: bool = False) -> str:
+    """Build EU classification batch prompt."""
+    toggle = "true" if block_unique_names else "false"
     
-    EU_NAMES = [
-        "Müller", "Schmidt", "Schneider", "García", "González", "Martin", "Bernard",
-        "Rossi", "Russo", "Ferrari", "Nielsen", "Hansen", "Andersson", "Larsson"
+    input_blocks = []
+    for idx, user in enumerate(users, start=1):
+        input_blocks.append(
+            f"""<input index=\"{idx}\">
+  <location>{user.get('location', '')}</location>
+  <description>{user.get('description', '')}</description>
+  <name>{user.get('name', '')}</name>
+  <block_unique_names>{toggle}</block_unique_names>
+</input>"""
+        )
+    
+    inputs_section = "\n".join(input_blocks)
+    if block_unique_names:
+        inputs_section += "\n" + "\n".join(UNIQUE_EU_USERNAMES)
+    
+    return (
+        f"SYSTEM:\n{EU_SYSTEM_PROMPT}\n\n"
+        f"Few-shot examples:\n{EU_FEW_SHOT}\n\n"
+        f"Inputs:\n{inputs_section}\n\n"
+        f"Output:\n{BATCH_OUTPUT_INSTRUCTIONS}"
+    )
+
+def build_legal_batch_prompt(users: List[Dict]) -> str:
+    """Build legal classification batch prompt."""
+    input_blocks = []
+    for idx, user in enumerate(users, start=1):
+        input_blocks.append(
+            f"""<input index=\"{idx}\">
+  <username>{user.get('username', '')}</username>
+  <full_name>{user.get('full_name', '')}</full_name>
+  <description>{user.get('description', '')}</description>
+</input>"""
+        )
+    
+    inputs_section = "\n".join(input_blocks)
+    
+    return (
+        f"SYSTEM:\n{LEGAL_SYSTEM_PROMPT}\n\n"
+        f"Few-shot examples:\n{LEGAL_FEW_SHOT}\n\n"
+        f"Inputs:\n{inputs_section}\n\n"
+        f"Output:\n{BATCH_OUTPUT_INSTRUCTIONS}"
+    )
+
+def build_gender_batch_prompt(users: List[Dict]) -> str:
+    """Build gender classification batch prompt."""
+    input_blocks = []
+    for idx, user in enumerate(users, start=1):
+        name = user.get('full_name') or user.get('name', '')
+        username = user.get('username', '')
+        input_blocks.append(
+            f"""<input index=\"{idx}\">
+  <name>{name}</name>
+  <username>{username}</username>
+</input>"""
+        )
+    
+    inputs_section = "\n".join(input_blocks)
+    
+    return (
+        f"SYSTEM:\n{GENDER_SYSTEM_PROMPT}\n\n"
+        f"Few-shot examples:\n{GENDER_FEW_SHOT}\n\n"
+        f"Inputs:\n{inputs_section}\n\n"
+        f"Output:\n{BATCH_OUTPUT_INSTRUCTIONS}"
+    )
+
+def parse_eu_batch_response(response_text: str, expected: int) -> List[bool]:
+    """Parse EU classification response."""
+    if not response_text:
+        raise ValueError("Empty response from model while parsing batch EU classifications")
+    
+    lines = [line.strip() for line in response_text.splitlines() if line.strip()]
+    classifications: List[bool] = []
+    
+    for line in lines:
+        if line == "<classification>EU</classification>":
+            classifications.append(True)
+        elif line == "<classification>NOT_EU</classification>":
+            classifications.append(False)
+    
+    if len(classifications) != expected:
+        raise ValueError(
+            f"Expected {expected} classifications but parsed {len(classifications)} "
+            "from model response.\nResponse was:\n" + response_text
+        )
+    return classifications
+
+def parse_legal_batch_response(response_text: str, expected: int) -> List[bool]:
+    """Parse legal classification response."""
+    if not response_text:
+        raise ValueError("Empty response from model while parsing batch legal classifications")
+    
+    lines = [line.strip() for line in response_text.splitlines() if line.strip()]
+    classifications: List[bool] = []
+    
+    for line in lines:
+        if line == "<classification>LEGAL</classification>":
+            classifications.append(True)
+        elif line == "<classification>NOT_LEGAL</classification>":
+            classifications.append(False)
+    
+    if len(classifications) != expected:
+        raise ValueError(
+            f"Expected {expected} legal classifications but parsed {len(classifications)} "
+            "from model response.\nResponse was:\n" + response_text
+        )
+    return classifications
+
+def parse_gender_batch_response(response_text: str, expected: int) -> List[str]:
+    """Parse gender classification response."""
+    if not response_text:
+        raise ValueError("Empty response from model while parsing batch gender classifications")
+    
+    lines = [line.strip() for line in response_text.splitlines() if line.strip()]
+    genders: List[str] = []
+    
+    for line in lines:
+        if line.startswith("<gender>") and line.endswith("</gender>"):
+            gender = line[8:-9].strip().lower()
+            genders.append(gender if gender in ["male", "female", "unknown"] else "unknown")
+    
+    if len(genders) != expected:
+        raise ValueError(
+            f"Expected {expected} gender classifications but parsed {len(genders)} "
+            "from model response.\nResponse was:\n" + response_text
+        )
+    return genders
+
+def classify_eu_batch(users: List[Dict], block_unique_names: bool = False) -> List[bool]:
+    """Classify a batch of users for EU filtering."""
+    prompt = build_eu_batch_prompt(users, block_unique_names)
+    response = get_ai_instance().process(prompt)
+    return parse_eu_batch_response(response, expected=len(users))
+
+def classify_legal_batch(users: List[Dict]) -> List[bool]:
+    """Classify a batch of users for legal filtering."""
+    prompt = build_legal_batch_prompt(users)
+    response = get_ai_instance().process(prompt)
+    return parse_legal_batch_response(response, expected=len(users))
+
+def classify_gender_batch(users: List[Dict]) -> List[str]:
+    """Classify a batch of users for gender enrichment."""
+    prompt = build_gender_batch_prompt(users)
+    response = get_ai_instance().process(prompt)
+    return parse_gender_batch_response(response, expected=len(users))
+
+async def _classify_eu_single_batch_async(batch: List[Dict], block_unique_names: bool) -> List[bool]:
+    """Run one EU batch inside limiter + semaphore in an executor."""
+    async with _semaphore, _limiter:
+        return await asyncio.to_thread(classify_eu_batch, batch, block_unique_names)
+
+async def _classify_legal_single_batch_async(batch: List[Dict]) -> List[bool]:
+    """Run one legal batch inside limiter + semaphore in an executor."""
+    async with _semaphore, _limiter:
+        return await asyncio.to_thread(classify_legal_batch, batch)
+
+async def _classify_gender_single_batch_async(batch: List[Dict]) -> List[str]:
+    """Run one gender batch inside limiter + semaphore in an executor."""
+    async with _semaphore, _limiter:
+        return await asyncio.to_thread(classify_gender_batch, batch)
+
+async def classify_eu_users_async(users: List[Dict], block_unique_names: bool = False, batch_size: int = BATCH_SIZE) -> List[bool]:
+    """High-throughput EU classification preserving order."""
+    if not users:
+        return []
+    
+    batches: List[List[Dict]] = [
+        users[i : i + batch_size] for i in range(0, len(users), batch_size)
     ]
     
-    def __init__(self, config: FilterConfig):
-        self.config = config
-        self._limiter = AsyncLimiter(config.rate_limit_per_sec, time_period=1)
-        self._semaphore = asyncio.Semaphore(config.max_concurrent)
+    tasks = [
+        asyncio.create_task(_classify_eu_single_batch_async(batch, block_unique_names))
+        for batch in batches
+    ]
     
-    async def process_filters(self, users: List[Dict]) -> Dict:
-        """Process users with AI-powered filtering and enrichment."""
-        ai_processor = get_ai_instance()
-        if not ai_processor.is_configured():
-            raise RuntimeError("EmberAI not configured. Call EmberAI.ai.configure() first.")
-        
-        if not users:
-            return {
-                'processed_users': [],
-                'original_count': 0,
-                'final_count': 0,
-                'processing_stats': {},
-                'filters_applied': []
-            }
-        
-        start_time = time.time()
-        current_users = users.copy() if self.config.preserve_order else users
-        filters_applied = []
-        
-        # Apply filters based on configuration
-        if self.config.block_eu:
-            current_users = await self._filter_eu_users(current_users)
-            filters_applied.append("block_eu")
-            if self.config.block_unique_names:
-                filters_applied.append("block_unique_names")
-        
-        if self.config.block_legal:
-            current_users = await self._filter_legal_users(current_users)
-            filters_applied.append("block_legal")
-        
-        if self.config.enrich_gender:
-            current_users = await self._enrich_gender(current_users)
-            filters_applied.append("enrich_gender")
-        
-        total_time = time.time() - start_time
-        
-        return {
-            'processed_users': current_users,
-            'original_count': len(users),
-            'final_count': len(current_users),
-            'filters_applied': filters_applied,
-            'processing_stats': {
-                'total_time_seconds': total_time,
-                'processing_rate': len(users) / total_time if total_time > 0 else 0
-            }
-        }
-    
-    async def _filter_eu_users(self, users: List[Dict]) -> List[Dict]:
-        """Filter out EU users using AI classification."""
-        if not users:
-            return users
-        
-        # Build prompt for EU classification
-        prompt = self._build_eu_prompt(users)
-        
-        # Process with AI
-        ai_processor = get_ai_instance()
-        async with self._semaphore, self._limiter:
-            response = await asyncio.to_thread(ai_processor.process, prompt)
-        
-        # Parse response and filter
-        classifications = self._parse_eu_response(response, len(users))
-        return [u for u, is_eu in zip(users, classifications) if not is_eu]
-    
-    async def _filter_legal_users(self, users: List[Dict]) -> List[Dict]:
-        """Filter out legal professionals using AI classification."""
-        if not users:
-            return users
-        
-        prompt = self._build_legal_prompt(users)
-        
-        ai_processor = get_ai_instance()
-        async with self._semaphore, self._limiter:
-            response = await asyncio.to_thread(ai_processor.process, prompt)
-        
-        classifications = self._parse_legal_response(response, len(users))
-        return [u for u, is_legal in zip(users, classifications) if not is_legal]
-    
-    async def _enrich_gender(self, users: List[Dict]) -> List[Dict]:
-        """Enrich users with gender information using AI classification."""
-        if not users:
-            return users
-        
-        prompt = self._build_gender_prompt(users)
-        
-        ai_processor = get_ai_instance()
-        async with self._semaphore, self._limiter:
-            response = await asyncio.to_thread(ai_processor.process, prompt)
-        
-        genders = self._parse_gender_response(response, len(users))
-        
-        # Add gender to users
-        enriched_users = []
-        for user, gender in zip(users, genders):
-            enriched_user = dict(user)
-            enriched_user['gender'] = gender
-            enriched_users.append(enriched_user)
-        
-        return enriched_users
-    
-    def _build_eu_prompt(self, users: List[Dict]) -> str:
-        """Build prompt for EU classification."""
-        unique_names_section = ""
-        if self.config.block_unique_names:
-            unique_names_section = """
-  <unique_names_detection>
-    IMPORTANT: Also classify as EU if the user's name or full_name is uniquely European/EU:
-    - German names (Klaus, Günter, Helga, Brigitte, Jürgen, Ingrid, etc.)
-    - Distinctly European names with special characters (ü, ö, ä, ñ, ç, etc.)
-    - Names that are predominantly used in EU countries
-    - Consider cultural naming patterns specific to EU regions
-    - Names with EU-specific diminutives or variations
-    Examples from provided list: """ + ", ".join(UNIQUE_EU_USERNAMES[:20]) + """ (and similar patterns)
-    This detection should work beyond the examples - use AI knowledge of European naming conventions.
-  </unique_names_detection>"""
-        
-        system_prompt = f"""<task>
-  <objective>
-    Detect whether the provided Twitter user is likely a resident of the European Union (EU).
-  </objective>
-  <input>
-    For each user, you'll receive:
-    <location>user location</location>
-    <name>user name</name>
-    <description>user bio/description</description>
-  </input>
-  <language_support>
-    Recognize EU residency indicators in multiple languages and formats:
-    Include:
-    - EU country names (Germany, France, Spain, Italy, Netherlands, etc.)
-    - EU cities (Berlin, Paris, Madrid, Rome, Amsterdam, Brussels, etc.)
-    - EU languages in bio (German, French, Italian, Spanish, Dutch, etc.)
-    - EU-specific references (GDPR, European Parliament, Euro currency €, EU timezones)
-    - EU cultural references (Eurovision, European football leagues, EU holidays)
-    - Educational institutions (European universities, EU exchange programs)
-    - EU professional contexts (European companies, EU regulations)
-  </language_support>{unique_names_section}
-  <output_format>
-    Return exactly one classification per user, one per line:
-    - <classification>EU</classification> (if ≥2 strong indicators or 1 strong + 2 weak{" or uniquely EU name" if self.config.block_unique_names else ""})
-    - <classification>NOT_EU</classification> (otherwise)
-  </output_format>
-  <rules>
-    1. Strong indicators: EU country/city names, EU languages, explicit EU references, EU timezone formats{", uniquely EU names" if self.config.block_unique_names else ""}
-    2. Weak indicators: European cultural references, EU-style date formats, European company names
-    3. Exclude: Non-EU European countries (UK post-Brexit, Switzerland, Norway, etc.)
-    4. Consider context: "visiting Paris" ≠ "living in Paris"
-    5. Default to NOT_EU if ambiguous or insufficient information
-    6. Ignore VPN/proxy locations without other supporting evidence{"""
-    7. UNIQUE NAMES: Names that are distinctly and predominantly European should be classified as EU even without other indicators""" if self.config.block_unique_names else ""}
-  </rules>
-</task>
+    results: List[bool] = []
+    for batch_res in await asyncio.gather(*tasks):
+        results.extend(batch_res)
+    return results
 
-Users to classify:"""
-        
-        input_blocks = []
-        for idx, user in enumerate(users, start=1):
-            input_blocks.append(f"""<user_{idx}>
-<location>{user.get('location', '')}</location>
-<name>{user.get('name', '')}</name>
-<description>{user.get('description', '')}</description>
-</user_{idx}>""")
-        
-        return f"{system_prompt}\n\n" + "\n".join(input_blocks)
+async def classify_legal_users_async(users: List[Dict], batch_size: int = BATCH_SIZE) -> List[bool]:
+    """High-throughput legal classification preserving order."""
+    if not users:
+        return []
     
-    def _build_legal_prompt(self, users: List[Dict]) -> str:
-        """Build prompt for legal profession classification."""
-        system_prompt = """<task>
-  <objective>
-    Detect whether the provided Twitter user is a lawyer, attorney, or legal professional.
-  </objective>
-  <input>
-    For each user, you'll receive:
-    <username>username</username>
-    <full_name>full name</full_name>
-    <description>bio/description</description>
-  </input>
-  <language_support>
-    Recognize legal professions in multiple languages (English, German, French, Spanish, etc.).
-    Include:
-    - Job titles (attorney, lawyer, barrister, counsel, solicitor, notary, judge, prosecutor)
-    - Education (JD, LLB, LLM, "Harvard Law", "Yale Law", "admitted to [bar]", "bar certified")
-    - Firms (law firms, legal departments, courts, "BigLaw", "Skadden", "DLA Piper")
-    - Professional indicators (Esq., "partner at", "associate at", "legal counsel")
-    - Emojis (⚖️, 🧑‍⚖️), hashtags (#LawyerLife, #LegalEagle, #AttorneyLife)
-    - Practice areas (litigation, corporate law, family law, criminal defense, etc.)
-    - Bar associations, legal certifications, court admissions
-  </language_support>
-  <output_format>
-    Return exactly one classification per user, one per line:
-    - <classification>LEGAL</classification> (if ≥2 strong indicators or 1 strong + 2 weak)
-    - <classification>NOT_LEGAL</classification> (otherwise)
-  </output_format>
-  <rules>
-    1. Strong indicators: "attorney," "lawyer," "admitted to the bar," "law firm partner," "Esq.," "JD," specific law schools
-    2. Weak indicators: "legal," "justice," law-related emojis, "LLM," "legal studies," "paralegal"
-    3. Exclude: Law students (unless practicing), legal analysts without JD, compliance officers, paralegals
-    4. Ignore sarcasm/parody (e.g., "not a real lawyer," "armchair lawyer")
-    5. Consider context: "legal advice" in bio vs "don't take this as legal advice"
-    6. Default to NOT_LEGAL if ambiguous or insufficient information
-  </rules>
-</task>
+    batches: List[List[Dict]] = [
+        users[i : i + batch_size] for i in range(0, len(users), batch_size)
+    ]
+    
+    tasks = [
+        asyncio.create_task(_classify_legal_single_batch_async(batch))
+        for batch in batches
+    ]
+    
+    results: List[bool] = []
+    for batch_res in await asyncio.gather(*tasks):
+        results.extend(batch_res)
+    return results
 
-Users to classify:"""
-        
-        input_blocks = []
-        for idx, user in enumerate(users, start=1):
-            input_blocks.append(f"""<user_{idx}>
-<username>{user.get('username', '')}</username>
-<full_name>{user.get('full_name', '')}</full_name>
-<description>{user.get('description', '')}</description>
-</user_{idx}>""")
-        
-        return f"{system_prompt}\n\n" + "\n".join(input_blocks)
+async def classify_gender_users_async(users: List[Dict], batch_size: int = BATCH_SIZE) -> List[str]:
+    """High-throughput gender classification preserving order."""
+    if not users:
+        return []
     
-    def _build_gender_prompt(self, users: List[Dict]) -> str:
-        """Build prompt for gender classification."""
-        system_prompt = """<task>
-  <objective>
-    Classify the likely gender of Twitter users based on their names and usernames, with cultural sensitivity.
-  </objective>
-  <input>
-    For each user, you'll receive:
-    <name>full name or display name</name>
-    <username>username/handle</username>
-  </input>
-  <language_support>
-    Recognize names across multiple cultures and languages:
-    Include:
-    - Western names (John/Jane, Michael/Michelle, David/Diana)
-    - European names (Giovanni/Giovanna, François/Françoise, Hans/Hanna)
-    - Asian names (Hiroshi/Hiroko, Wei/Wei, Raj/Priya)
-    - Arabic names (Mohammed/Fatima, Ahmed/Aisha)
-    - African names (Kwame/Ama, Chike/Ngozi)
-    - Latin American names (Carlos/Carla, José/María)
-    - Gender-neutral names (Alex, Taylor, Jordan, Casey)
-    - Modern/unique names and cultural variations
-  </language_support>
-  <output_format>
-    Return exactly one classification per user, one per line:
-    - <gender>male</gender> (strong indicators of male identity)
-    - <gender>female</gender> (strong indicators of female identity)
-    - <gender>unknown</gender> (ambiguous, gender-neutral, or insufficient information)
-  </output_format>
-  <rules>
-    1. Prioritize first names over surnames for gender classification
-    2. Consider cultural context (same name may have different gender implications across cultures)
-    3. Handle compound names (Mary-Jane = female, Jean-Pierre = male)
-    4. Username patterns: numbers/random characters usually indicate unknown
-    5. Common gender-neutral names default to unknown unless other indicators present
-    6. Respect non-binary possibilities - when in doubt, classify as unknown
-    7. Don't make assumptions based on stereotypes or professions
-    8. Handle initials (J. Smith) as unknown unless clear context
-  </rules>
-</task>
-
-Users to classify:"""
-        
-        input_blocks = []
-        for idx, user in enumerate(users, start=1):
-            name = user.get('full_name') or user.get('name', '')
-            username = user.get('username', '')
-            input_blocks.append(f"""<user_{idx}>
-<name>{name}</name>
-<username>{username}</username>
-</user_{idx}>""")
-        
-        return f"{system_prompt}\n\n" + "\n".join(input_blocks)
+    batches: List[List[Dict]] = [
+        users[i : i + batch_size] for i in range(0, len(users), batch_size)
+    ]
     
-    def _parse_eu_response(self, response: str, expected: int) -> List[bool]:
-        """Parse EU classification response."""
-        lines = [line.strip() for line in response.splitlines() if line.strip()]
-        classifications = []
-        
-        for line in lines:
-            if line == "<classification>EU</classification>":
-                classifications.append(True)
-            elif line == "<classification>NOT_EU</classification>":
-                classifications.append(False)
-        
-        return classifications[:expected]
+    tasks = [
+        asyncio.create_task(_classify_gender_single_batch_async(batch))
+        for batch in batches
+    ]
     
-    def _parse_legal_response(self, response: str, expected: int) -> List[bool]:
-        """Parse legal classification response."""
-        lines = [line.strip() for line in response.splitlines() if line.strip()]
-        classifications = []
-        
-        for line in lines:
-            if line == "<classification>LEGAL</classification>":
-                classifications.append(True)
-            elif line == "<classification>NOT_LEGAL</classification>":
-                classifications.append(False)
-        
-        return classifications[:expected]
-    
-    def _parse_gender_response(self, response: str, expected: int) -> List[str]:
-        """Parse gender classification response."""
-        lines = [line.strip() for line in response.splitlines() if line.strip()]
-        genders = []
-        
-        for line in lines:
-            if line.startswith("<gender>") and line.endswith("</gender>"):
-                gender = line[8:-9].strip().lower()
-                genders.append(gender if gender in ["male", "female", "unknown"] else "unknown")
-        
-        return genders[:expected]
+    results: List[str] = []
+    for batch_res in await asyncio.gather(*tasks):
+        results.extend(batch_res)
+    return results
 
 # Global configuration
 _config = FilterConfig()
-_processor = None
 
 def configure(**kwargs):
     """Configure the filters module."""
-    global _config, _processor
+    global _config
     for key, value in kwargs.items():
         if hasattr(_config, key):
             setattr(_config, key, value)
-    _processor = FilterProcessor(_config)
     logger.info("✅ EmberAI Filters configured")
 
 async def process(users: List[Dict], **kwargs) -> List[Dict]:
     """Process users with AI-powered filtering."""
+    if not users:
+        return []
+    
+    ai_processor = get_ai_instance()
+    if not ai_processor.is_configured():
+        raise RuntimeError("EmberAI not configured. Call EmberAI.ai.configure() first.")
+    
     config = FilterConfig(**kwargs)
-    processor = FilterProcessor(config)
-    result = await processor.process_filters(users)
+    start_time = time.time()
+    current_users = users.copy() if config.preserve_order else users
+    filters_applied = []
+    
+    # Apply EU filter
+    if config.block_eu:
+        eu_classifications = await classify_eu_users_async(
+            current_users, 
+            block_unique_names=config.block_unique_names,
+            batch_size=config.batch_size
+        )
+        current_users = [u for u, is_eu in zip(current_users, eu_classifications) if not is_eu]
+        filters_applied.append("block_eu")
+        if config.block_unique_names:
+            filters_applied.append("block_unique_names")
+    
+    # Apply legal filter
+    if config.block_legal:
+        legal_classifications = await classify_legal_users_async(
+            current_users,
+            batch_size=config.batch_size
+        )
+        current_users = [u for u, is_legal in zip(current_users, legal_classifications) if not is_legal]
+        filters_applied.append("block_legal")
+    
+    # Apply gender enrichment
+    if config.enrich_gender:
+        gender_classifications = await classify_gender_users_async(
+            current_users,
+            batch_size=config.batch_size
+        )
+        enriched_users = []
+        for user, gender in zip(current_users, gender_classifications):
+            enriched_user = dict(user)
+            enriched_user['gender'] = gender
+            enriched_users.append(enriched_user)
+        current_users = enriched_users
+        filters_applied.append("enrich_gender")
+    
+    total_time = time.time() - start_time
+    
+    if config.log_stats:
+        logger.info(f"✅ Filters applied: {filters_applied}")
+        logger.info(f"✅ Original count: {len(users)}")
+        logger.info(f"✅ Final count: {len(current_users)}")
+        logger.info(f"✅ Processing time: {total_time:.2f}s")
+        logger.info(f"✅ Processing rate: {len(users) / total_time if total_time > 0 else 0:.1f} users/sec")
+    
+    return current_users
 
-    logger.info(f"✅ Filters applied: {result['filters_applied']}")
-    logger.info(f"✅ Original count: {result['original_count']}")
-    logger.info(f"✅ Final count: {result['final_count']}")
-    logger.info(f"✅ Processing stats: {result['processing_stats']}")
-
-    return result['processed_users']
-
-__all__ = ["FilterConfig", "FilterProcessor", "configure", "process"] 
+__all__ = [
+    "FilterConfig", 
+    "configure", 
+    "process",
+    "build_eu_batch_prompt",
+    "parse_eu_batch_response", 
+    "classify_eu_batch",
+    "classify_eu_users_async",
+    "build_legal_batch_prompt",
+    "parse_legal_batch_response",
+    "classify_legal_batch", 
+    "classify_legal_users_async",
+    "build_gender_batch_prompt",
+    "parse_gender_batch_response",
+    "classify_gender_batch",
+    "classify_gender_users_async"
+] 
