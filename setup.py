@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="EmberAI",
-    version="1.0.0",
+    version="1.0.1",
     author="Saqib Khan Afridi",
     author_email="s@embertechlab.com",
     description="Comprehensive AI processing system with filtering and enrichment capabilities",

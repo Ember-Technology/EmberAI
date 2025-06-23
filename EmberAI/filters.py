@@ -138,49 +138,155 @@ class FilterProcessor:
     
     def _build_eu_prompt(self, users: List[Dict]) -> str:
         """Build prompt for EU classification."""
-        system_prompt = """Classify if users are EU residents. Return exactly one per line:
-<classification>EU</classification> or <classification>NOT_EU</classification>"""
+        system_prompt = """<task>
+  <objective>
+    Detect whether the provided Twitter user is likely a resident of the European Union (EU).
+  </objective>
+  <input>
+    For each user, you'll receive:
+    <location>user location</location>
+    <name>user name</name>
+    <description>user bio/description</description>
+  </input>
+  <language_support>
+    Recognize EU residency indicators in multiple languages and formats:
+    Include:
+    - EU country names (Germany, France, Spain, Italy, Netherlands, etc.)
+    - EU cities (Berlin, Paris, Madrid, Rome, Amsterdam, Brussels, etc.)
+    - EU languages in bio (German, French, Italian, Spanish, Dutch, etc.)
+    - EU-specific references (GDPR, European Parliament, Euro currency €, EU timezones)
+    - EU cultural references (Eurovision, European football leagues, EU holidays)
+    - Educational institutions (European universities, EU exchange programs)
+    - EU professional contexts (European companies, EU regulations)
+  </language_support>
+  <output_format>
+    Return exactly one classification per user, one per line:
+    - <classification>EU</classification> (if ≥2 strong indicators or 1 strong + 2 weak)
+    - <classification>NOT_EU</classification> (otherwise)
+  </output_format>
+  <rules>
+    1. Strong indicators: EU country/city names, EU languages, explicit EU references, EU timezone formats
+    2. Weak indicators: European cultural references, EU-style date formats, European company names
+    3. Exclude: Non-EU European countries (UK post-Brexit, Switzerland, Norway, etc.)
+    4. Consider context: "visiting Paris" ≠ "living in Paris"
+    5. Default to NOT_EU if ambiguous or insufficient information
+    6. Ignore VPN/proxy locations without other supporting evidence
+  </rules>
+</task>
+
+Users to classify:"""
         
         input_blocks = []
         for idx, user in enumerate(users, start=1):
-            input_blocks.append(f"""<input {idx}>
-Location: {user.get('location', '')}
-Name: {user.get('name', '')}
-Description: {user.get('description', '')}
-</input>""")
+            input_blocks.append(f"""<user_{idx}>
+<location>{user.get('location', '')}</location>
+<name>{user.get('name', '')}</name>
+<description>{user.get('description', '')}</description>
+</user_{idx}>""")
         
         return f"{system_prompt}\n\n" + "\n".join(input_blocks)
     
     def _build_legal_prompt(self, users: List[Dict]) -> str:
         """Build prompt for legal profession classification."""
-        system_prompt = """Classify if users are legal professionals. Return exactly one per line:
-<classification>LEGAL</classification> or <classification>NOT_LEGAL</classification>"""
+        system_prompt = """<task>
+  <objective>
+    Detect whether the provided Twitter user is a lawyer, attorney, or legal professional.
+  </objective>
+  <input>
+    For each user, you'll receive:
+    <username>username</username>
+    <full_name>full name</full_name>
+    <description>bio/description</description>
+  </input>
+  <language_support>
+    Recognize legal professions in multiple languages (English, German, French, Spanish, etc.).
+    Include:
+    - Job titles (attorney, lawyer, barrister, counsel, solicitor, notary, judge, prosecutor)
+    - Education (JD, LLB, LLM, "Harvard Law", "Yale Law", "admitted to [bar]", "bar certified")
+    - Firms (law firms, legal departments, courts, "BigLaw", "Skadden", "DLA Piper")
+    - Professional indicators (Esq., "partner at", "associate at", "legal counsel")
+    - Emojis (⚖️, 🧑‍⚖️), hashtags (#LawyerLife, #LegalEagle, #AttorneyLife)
+    - Practice areas (litigation, corporate law, family law, criminal defense, etc.)
+    - Bar associations, legal certifications, court admissions
+  </language_support>
+  <output_format>
+    Return exactly one classification per user, one per line:
+    - <classification>LEGAL</classification> (if ≥2 strong indicators or 1 strong + 2 weak)
+    - <classification>NOT_LEGAL</classification> (otherwise)
+  </output_format>
+  <rules>
+    1. Strong indicators: "attorney," "lawyer," "admitted to the bar," "law firm partner," "Esq.," "JD," specific law schools
+    2. Weak indicators: "legal," "justice," law-related emojis, "LLM," "legal studies," "paralegal"
+    3. Exclude: Law students (unless practicing), legal analysts without JD, compliance officers, paralegals
+    4. Ignore sarcasm/parody (e.g., "not a real lawyer," "armchair lawyer")
+    5. Consider context: "legal advice" in bio vs "don't take this as legal advice"
+    6. Default to NOT_LEGAL if ambiguous or insufficient information
+  </rules>
+</task>
+
+Users to classify:"""
         
         input_blocks = []
         for idx, user in enumerate(users, start=1):
-            input_blocks.append(f"""<input {idx}>
-Username: {user.get('username', '')}
-Name: {user.get('full_name', '')}
-Description: {user.get('description', '')}
-Education: {user.get('education', '')}
-Employer: {user.get('employer', '')}
-</input>""")
+            input_blocks.append(f"""<user_{idx}>
+<username>{user.get('username', '')}</username>
+<full_name>{user.get('full_name', '')}</full_name>
+<description>{user.get('description', '')}</description>
+</user_{idx}>""")
         
         return f"{system_prompt}\n\n" + "\n".join(input_blocks)
     
     def _build_gender_prompt(self, users: List[Dict]) -> str:
         """Build prompt for gender classification."""
-        system_prompt = """Classify gender from names/usernames. Return exactly one per line:
-<gender>male</gender>, <gender>female</gender>, or <gender>unknown</gender>"""
+        system_prompt = """<task>
+  <objective>
+    Classify the likely gender of Twitter users based on their names and usernames, with cultural sensitivity.
+  </objective>
+  <input>
+    For each user, you'll receive:
+    <name>full name or display name</name>
+    <username>username/handle</username>
+  </input>
+  <language_support>
+    Recognize names across multiple cultures and languages:
+    Include:
+    - Western names (John/Jane, Michael/Michelle, David/Diana)
+    - European names (Giovanni/Giovanna, François/Françoise, Hans/Hanna)
+    - Asian names (Hiroshi/Hiroko, Wei/Wei, Raj/Priya)
+    - Arabic names (Mohammed/Fatima, Ahmed/Aisha)
+    - African names (Kwame/Ama, Chike/Ngozi)
+    - Latin American names (Carlos/Carla, José/María)
+    - Gender-neutral names (Alex, Taylor, Jordan, Casey)
+    - Modern/unique names and cultural variations
+  </language_support>
+  <output_format>
+    Return exactly one classification per user, one per line:
+    - <gender>male</gender> (strong indicators of male identity)
+    - <gender>female</gender> (strong indicators of female identity)
+    - <gender>unknown</gender> (ambiguous, gender-neutral, or insufficient information)
+  </output_format>
+  <rules>
+    1. Prioritize first names over surnames for gender classification
+    2. Consider cultural context (same name may have different gender implications across cultures)
+    3. Handle compound names (Mary-Jane = female, Jean-Pierre = male)
+    4. Username patterns: numbers/random characters usually indicate unknown
+    5. Common gender-neutral names default to unknown unless other indicators present
+    6. Respect non-binary possibilities - when in doubt, classify as unknown
+    7. Don't make assumptions based on stereotypes or professions
+    8. Handle initials (J. Smith) as unknown unless clear context
+  </rules>
+</task>
+
+Users to classify:"""
         
         input_blocks = []
         for idx, user in enumerate(users, start=1):
             name = user.get('full_name') or user.get('name', '')
             username = user.get('username', '')
-            input_blocks.append(f"""<input {idx}>
-Name: {name}
-Username: {username}
-</input>""")
+            input_blocks.append(f"""<user_{idx}>
+<name>{name}</name>
+<username>{username}</username>
+</user_{idx}>""")
         
         return f"{system_prompt}\n\n" + "\n".join(input_blocks)
     
