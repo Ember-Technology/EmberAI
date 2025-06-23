@@ -12,12 +12,122 @@ from .ai import get_instance as get_ai_instance
 
 logger = logging.getLogger(__name__)
 
+
+UNIQUE_EU_USERNAMES = [
+    "Albrecht",
+    "Ansgar",
+    "Bernd",
+    "Björn",
+    "Clemens",
+    "Dieter",
+    "Eberhard",
+    "Eckhart",
+    "Egon",
+    "Ernst",
+    "Falko",
+    "Friedrich",
+    "Gernot",
+    "Gunther",
+    "Hagen",
+    "Hansjörg",
+    "Hartmut",
+    "Heiner",
+    "Helmut",
+    "Henning",
+    "Hermann",
+    "Horst",
+    "Ingmar",
+    "Jörg",
+    "Jürgen",
+    "Kai-Uwe",
+    "Klaus",
+    "Konrad",
+    "Lutz",
+    "Manfred",
+    "Marcel",
+    "Markus",
+    "Matthias",
+    "Norbert",
+    "Olaf",
+    "Otto",
+    "Pascal",
+    "Rainer",
+    "Reinhard",
+    "Roland",
+    "Rolf",
+    "Rüdiger",
+    "Siegfried",
+    "Steffen",
+    "Thilo",
+    "Thorsten",
+    "Timo",
+    "Ulrich",
+    "Uwe",
+    "Wolfgang",
+    "Anneliese",
+    "Babette",
+    "Beate",
+    "Brigitte",
+    "Carina",
+    "Dagmar",
+    "Edeltraud",
+    "Elfriede",
+    "Erika",
+    "Friederike",
+    "Gabriele",
+    "Gertrud",
+    "Gudrun",
+    "Heike",
+    "Helga",
+    "Hildegard",
+    "Ilse",
+    "Ingrid",
+    "Irmgard",
+    "Jutta",
+    "Karin",
+    "Katja",
+    "Kirsten",
+    "Lieselotte",
+    "Lore",
+    "Magda",
+    "Margarete",
+    "Marianne",
+    "Marlies",
+    "Monika",
+    "Petra",
+    "Renate",
+    "Sabine",
+    "Sigrid",
+    "Silke",
+    "Suse",
+    "Sybille",
+    "Thea",
+    "Traudel",
+    "Ulla",
+    "Ursula",
+    "Verena",
+    "Walburga",
+    "Waltraud",
+    "Wilhelmine",
+    "Yvonne",
+    "Arno",
+    "Detlef",
+    "Gisela",
+    "Heino",
+    "Inka",
+    "Lothar",
+    "Ottilie",
+    "Siegmund",
+    "Theodor",
+    "Volkmar"
+]
+
 @dataclass
 class FilterConfig:
     """Configuration for AI filters with toggles."""
     block_eu: bool = False
     block_legal: bool = False
-    block_eu_usernames: bool = False
+    block_unique_names: bool = False
     enrich_gender: bool = False
     preserve_order: bool = True
     log_stats: bool = True
@@ -61,6 +171,8 @@ class FilterProcessor:
         if self.config.block_eu:
             current_users = await self._filter_eu_users(current_users)
             filters_applied.append("block_eu")
+            if self.config.block_unique_names:
+                filters_applied.append("block_unique_names")
         
         if self.config.block_legal:
             current_users = await self._filter_legal_users(current_users)
@@ -138,7 +250,21 @@ class FilterProcessor:
     
     def _build_eu_prompt(self, users: List[Dict]) -> str:
         """Build prompt for EU classification."""
-        system_prompt = """<task>
+        unique_names_section = ""
+        if self.config.block_unique_names:
+            unique_names_section = """
+  <unique_names_detection>
+    IMPORTANT: Also classify as EU if the user's name or full_name is uniquely European/EU:
+    - German names (Klaus, Günter, Helga, Brigitte, Jürgen, Ingrid, etc.)
+    - Distinctly European names with special characters (ü, ö, ä, ñ, ç, etc.)
+    - Names that are predominantly used in EU countries
+    - Consider cultural naming patterns specific to EU regions
+    - Names with EU-specific diminutives or variations
+    Examples from provided list: """ + ", ".join(UNIQUE_EU_USERNAMES[:20]) + """ (and similar patterns)
+    This detection should work beyond the examples - use AI knowledge of European naming conventions.
+  </unique_names_detection>"""
+        
+        system_prompt = f"""<task>
   <objective>
     Detect whether the provided Twitter user is likely a resident of the European Union (EU).
   </objective>
@@ -158,19 +284,20 @@ class FilterProcessor:
     - EU cultural references (Eurovision, European football leagues, EU holidays)
     - Educational institutions (European universities, EU exchange programs)
     - EU professional contexts (European companies, EU regulations)
-  </language_support>
+  </language_support>{unique_names_section}
   <output_format>
     Return exactly one classification per user, one per line:
-    - <classification>EU</classification> (if ≥2 strong indicators or 1 strong + 2 weak)
+    - <classification>EU</classification> (if ≥2 strong indicators or 1 strong + 2 weak{" or uniquely EU name" if self.config.block_unique_names else ""})
     - <classification>NOT_EU</classification> (otherwise)
   </output_format>
   <rules>
-    1. Strong indicators: EU country/city names, EU languages, explicit EU references, EU timezone formats
+    1. Strong indicators: EU country/city names, EU languages, explicit EU references, EU timezone formats{", uniquely EU names" if self.config.block_unique_names else ""}
     2. Weak indicators: European cultural references, EU-style date formats, European company names
     3. Exclude: Non-EU European countries (UK post-Brexit, Switzerland, Norway, etc.)
     4. Consider context: "visiting Paris" ≠ "living in Paris"
     5. Default to NOT_EU if ambiguous or insufficient information
-    6. Ignore VPN/proxy locations without other supporting evidence
+    6. Ignore VPN/proxy locations without other supporting evidence{"""
+    7. UNIQUE NAMES: Names that are distinctly and predominantly European should be classified as EU even without other indicators""" if self.config.block_unique_names else ""}
   </rules>
 </task>
 
