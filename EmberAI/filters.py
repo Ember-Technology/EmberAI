@@ -2,7 +2,7 @@
 EmberAI.filters: AI-powered filtering and enrichment system.
 """
 
-from typing import List, Dict, Optional
+from typing import List, Dict
 from dataclasses import dataclass
 import logging
 import time
@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FilterConfig:
     """Configuration for AI filters with toggles."""
-    block_eu_users: bool = False
-    block_legal_users: bool = False
-    block_unique_names: bool = False
+    block_eu: bool = False
+    block_legal: bool = False
+    block_eu_usernames: bool = False
     enrich_gender: bool = False
     preserve_order: bool = True
     log_stats: bool = True
@@ -58,13 +58,13 @@ class FilterProcessor:
         filters_applied = []
         
         # Apply filters based on configuration
-        if self.config.block_eu_users:
+        if self.config.block_eu:
             current_users = await self._filter_eu_users(current_users)
-            filters_applied.append("block_eu_users")
+            filters_applied.append("block_eu")
         
-        if self.config.block_legal_users:
+        if self.config.block_legal:
             current_users = await self._filter_legal_users(current_users)
-            filters_applied.append("block_legal_users")
+            filters_applied.append("block_legal")
         
         if self.config.enrich_gender:
             current_users = await self._enrich_gender(current_users)

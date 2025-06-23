@@ -6,12 +6,12 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     name="EmberAI",
     version="1.0.0",
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="Saqib Khan Afridi",
+    author_email="s@embertechlab.com",
     description="Comprehensive AI processing system with filtering and enrichment capabilities",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/EmberAI",
+    url="https://github.com/Ember-Technology/EmberAI",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 4 - Beta",

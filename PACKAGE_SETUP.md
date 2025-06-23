@@ -31,7 +31,7 @@ EmberAI-package/
 Install directly from GitHub repository:
 
 ```bash
-pip install git+https://github.com/yourusername/EmberAI.git
+pip install https://github.com/Ember-Technology/EmberAI.git
 ```
 
 ### Method 2: Development Installation
@@ -39,7 +39,7 @@ pip install git+https://github.com/yourusername/EmberAI.git
 For development and testing:
 
 ```bash
-git clone https://github.com/yourusername/EmberAI.git
+git clone https://github.com/Ember-Technology/EmberAI.git
 cd EmberAI
 pip install -e .
 ```
@@ -337,7 +337,7 @@ FROM python:3.9-slim
 WORKDIR /app
 
 # Install EmberAI
-RUN pip install git+https://github.com/yourusername/EmberAI.git
+RUN pip install git+https://github.com/Ember-Technology/EmberAI.git
 
 # Copy your application
 COPY . .
@@ -353,7 +353,7 @@ CMD ["python", "main.py"]
 
 ```txt
 # requirements.txt
-EmberAI @ git+https://github.com/yourusername/EmberAI.git
+EmberAI @ git+https://github.com/Ember-Technology/EmberAI.git
 aiohttp>=3.8.0
 fastapi>=0.68.0
 ```
@@ -390,10 +390,10 @@ def process_users(request):
 
 ```bash
 # Update to latest version
-pip install --upgrade git+https://github.com/yourusername/EmberAI.git
+pip install --upgrade git+https://github.com/Ember-Technology/EmberAI.git
 
 # Install specific version (when tagged)
-pip install git+https://github.com/yourusername/EmberAI.git@v1.0.0
+pip install git+https://github.com/Ember-Technology/EmberAI@v1.1.0
 ```
 
 ### Version Checking

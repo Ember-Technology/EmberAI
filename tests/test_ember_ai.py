@@ -5,8 +5,7 @@ This module contains tests for both the AI processing and filtering functionalit
 """
 
 import pytest
-import asyncio
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import Mock, patch
 import EmberAI
 from EmberAI.filters import FilterConfig, FilterProcessor
 

@@ -16,13 +16,13 @@ Comprehensive AI processing system with filtering and enrichment capabilities po
 ### From GitHub (Recommended)
 
 ```bash
-pip install git+https://github.com/yourusername/EmberAI.git
+pip install https://github.com/Ember-Technology/EmberAI.git
 ```
 
 ### Development Installation
 
 ```bash
-git clone https://github.com/yourusername/EmberAI.git
+git clone https://github.com/Ember-Technology/EmberAI.git
 cd EmberAI
 pip install -e .
 ```
